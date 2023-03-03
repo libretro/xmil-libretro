@@ -177,9 +177,9 @@ else ifneq (,$(filter $(platform), ngc wii wiiu))
    AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
    FLAGS += -DGEKKO -mcpu=750 -meabi -mhard-float -malign-natural 
    FLAGS += -fsingle-precision-constant -mno-bit-align
-   FLAGS += -DHAVE_STRTOUL
+   FLAGS += -DHAVE_STRTOUL -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__
    ifneq (,$(findstring wiiu,$(platform)))
-      FLAGS += -DWIIU -DHW_RVL -mwup
+      FLAGS += -DWIIU -DHW_RVL
    else ifneq (,$(findstring wii,$(platform)))
       FLAGS += -DHW_RVL -mrvl
    else ifneq (,$(findstring ngc,$(platform)))
