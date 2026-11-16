@@ -10,7 +10,7 @@ WIP and basic port
 bios load from retroarch system directory in a folder named
 xmil: ("IPLROM.X1" "IPLROM.X1T")
 
-valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd"
+valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd|m3u"
 
 Know bugs:
 
