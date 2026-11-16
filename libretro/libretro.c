@@ -362,7 +362,7 @@ void retro_get_system_info(struct retro_system_info *info)
    info->library_name = "x1";
    info->library_version = "0.60";
    info->need_fullpath = true;
-   info->valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd";
+   info->valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd|m3u";
 }
 
 void retro_get_system_av_info(struct retro_system_av_info *info)
@@ -432,6 +432,142 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
     (void)code;
 }
 
+/* ------------------------------------------------------------------
+ * Disk list helpers (multi-disk support)
+ * ------------------------------------------------------------------ */
+
+/* Free every entry of the disk list and reset the counters. */
+static void disk_list_clear(void)
+{
+   int i;
+
+   for (i = 0; i < MAX_DISK_IMAGES; i++)
+   {
+      if (images[i])
+      {
+         free(images[i]);
+         images[i] = NULL;
+      }
+   }
+   cur_disk_idx = 0;
+   cur_disk_num = 0;
+}
+
+/* Case-insensitive check of a file extension (ext given without the dot). */
+static int path_has_extension(const char *path, const char *ext)
+{
+   size_t plen = strlen(path);
+   size_t elen = strlen(ext);
+   size_t i;
+
+   if (plen <= elen || path[plen - elen - 1] != '.')
+      return 0;
+
+   for (i = 0; i < elen; i++)
+   {
+      if (tolower((unsigned char)path[plen - elen + i]) !=
+          tolower((unsigned char)ext[i]))
+         return 0;
+   }
+   return 1;
+}
+
+static int path_is_absolute(const char *path)
+{
+   if (path[0] == '/' || path[0] == '\\')
+      return 1;
+   /* Windows drive letter, e.g. "C:\games\disk.d88" */
+   if (isalpha((unsigned char)path[0]) && path[1] == ':')
+      return 1;
+   return 0;
+}
+
+/* Fill the disk list from an .m3u playlist.
+ * One disk image per line. Empty lines and lines starting with '#' are
+ * ignored. Relative paths are resolved from the playlist's directory.
+ * Returns the number of disks found. */
+static int disk_list_load_m3u(const char *m3u_path)
+{
+   char line[1024];
+   char base_dir[1024];
+   char full[2048];
+   FILE *fp;
+   const char *sep1;
+   const char *sep2;
+   const char *last_sep;
+   size_t base_len;
+   int first_line = 1;
+
+   fp = fopen(m3u_path, "r");
+   if (!fp)
+   {
+      log_printf("Could not open playlist: %s\n", m3u_path);
+      return 0;
+   }
+
+   /* Directory of the playlist, including the trailing separator. */
+   sep1 = strrchr(m3u_path, '/');
+   sep2 = strrchr(m3u_path, '\\');
+   if (!sep1)
+      last_sep = sep2;
+   else if (!sep2)
+      last_sep = sep1;
+   else
+      last_sep = (sep1 > sep2) ? sep1 : sep2;
+   base_len = last_sep ? (size_t)(last_sep - m3u_path) + 1 : 0;
+   if (base_len >= sizeof(base_dir))
+      base_len = 0;
+   memcpy(base_dir, m3u_path, base_len);
+   base_dir[base_len] = '\0';
+
+   while (cur_disk_num < MAX_DISK_IMAGES &&
+          fgets(line, sizeof(line), fp))
+   {
+      char *p = line;
+      char *end;
+      size_t len = strlen(line);
+
+      /* Over-long line: throw away the rest of it. */
+      if (len > 0 && line[len - 1] != '\n' && !feof(fp))
+      {
+         int c;
+         while ((c = fgetc(fp)) != EOF && c != '\n')
+            ;
+      }
+
+      /* Skip UTF-8 byte order mark on the first line. */
+      if (first_line)
+      {
+         first_line = 0;
+         if ((unsigned char)p[0] == 0xEF &&
+             (unsigned char)p[1] == 0xBB &&
+             (unsigned char)p[2] == 0xBF)
+            p += 3;
+      }
+
+      while (*p == ' ' || *p == '\t')
+         p++;
+
+      end = p + strlen(p);
+      while (end > p && (end[-1] == '\r' || end[-1] == '\n' ||
+                         end[-1] == ' '  || end[-1] == '\t'))
+         *--end = '\0';
+
+      if (*p == '\0' || *p == '#')
+         continue;
+
+      if (path_is_absolute(p))
+         snprintf(full, sizeof(full), "%s", p);
+      else
+         snprintf(full, sizeof(full), "%s%s", base_dir, p);
+
+      images[cur_disk_num++] = strdup(full);
+   }
+
+   fclose(fp);
+   return cur_disk_num;
+}
+
 bool retro_load_game(const struct retro_game_info *info)
 {
    const char *full_path;
@@ -445,12 +581,34 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
 
-   full_path = info->path;
-   images[0] = strdup(full_path);
-   cur_disk_idx = 0;
-   cur_disk_num = full_path ? 1 : 0;
+   if (!info || !info->path)
+   {
+      log_printf("No content given.\n");
+      return false;
+   }
 
-   strcpy(RPATH,full_path);
+   full_path = info->path;
+
+   disk_list_clear();
+
+   if (path_has_extension(full_path, "m3u"))
+   {
+      if (disk_list_load_m3u(full_path) == 0)
+      {
+         log_printf("Playlist contains no disks: %s\n", full_path);
+         return false;
+      }
+   }
+   else
+   {
+      images[0] = strdup(full_path);
+      cur_disk_num = 1;
+   }
+   cur_disk_idx = 0;
+
+   /* The first disk in the list is the one that gets booted. */
+   strncpy(RPATH, images[0], sizeof(RPATH) - 1);
+   RPATH[sizeof(RPATH) - 1] = '\0';
 
    log_printf("LOAD EMU\n");
 
@@ -468,6 +626,7 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
 void retro_unload_game(void)
 {
      pauseg=0;
+     disk_list_clear();
 }
 
 unsigned retro_get_region(void)
@@ -507,7 +666,7 @@ size_t retro_get_memory_size(unsigned id)
 }
 
 bool set_eject_state(bool ejected) {
-  if (ejected || cur_disk_idx >= cur_disk_num) {
+  if (ejected || cur_disk_idx >= cur_disk_num || !images[cur_disk_idx]) {
     fddfile_eject(0);
   } else {
     diskdrv_setfdd(0, images[cur_disk_idx], 0);
@@ -536,15 +695,36 @@ unsigned get_num_images(void) {
 
 bool replace_image_index(unsigned index,
 			 const struct retro_game_info *info) {
-  if (index >= cur_disk_num)
+  int i;
+
+  if ((int)index >= cur_disk_num)
     return 0;
-  images[index] = strdup(info->path);
+
+  if (info && info->path) {
+    /* Put a new image in this slot. */
+    if (images[index])
+      free(images[index]);
+    images[index] = strdup(info->path);
+    return 1;
+  }
+
+  /* info == NULL: remove the image and close the gap in the list. */
+  if (images[index])
+    free(images[index]);
+  for (i = (int)index; i < cur_disk_num - 1; i++)
+    images[i] = images[i + 1];
+  images[cur_disk_num - 1] = NULL;
+  cur_disk_num--;
+  if (cur_disk_idx > cur_disk_num)
+    cur_disk_idx = cur_disk_num;
   return 1;
 }
 
 bool add_image_index(void) {
-  if (cur_disk_num >= MAX_DISK_IMAGES - 1)
+  if (cur_disk_num >= MAX_DISK_IMAGES)
     return 0;
+  /* New empty slot; replace_image_index() fills it in afterwards. */
+  images[cur_disk_num] = NULL;
   cur_disk_num++;
   return 1;
 }
