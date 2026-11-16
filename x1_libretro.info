@@ -1,6 +1,6 @@
 display_name = "X Millennium Sharp X1 emulator"
 authors = "yui"
-supported_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|tap|cmd"
+supported_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|tap|cmd|m3u"
 corename = "x1"
 categories = "Computer"
 database = "Sharp X1"
