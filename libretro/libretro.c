@@ -64,7 +64,14 @@ uint16_t videoBuffer[(SCREEN_PITCH / 2) * FULLSCREEN_HEIGHT];  //emu  surf
 
 #define MAX_DISK_IMAGES 100
 static char *images[MAX_DISK_IMAGES];
-static int cur_disk_idx, cur_disk_num;
+static int cur_disk_num;
+
+/* The core emulates two floppy drives, FDD0 and FDD1. The disk list is shared
+ * by both; drive_idx[] remembers which list entry is selected for each drive
+ * (-1 = no disk). RetroArch's Disk Control menu works on one drive at a time,
+ * chosen with the "Swap Disks on Drive" core option. */
+#define NUM_SWAP_DRIVES 2
+static int drive_idx[NUM_SWAP_DRIVES] = { -1, -1 };
 
 static retro_video_refresh_t video_cb;
 static retro_environment_t environ_cb;
@@ -116,6 +123,75 @@ void log_printf(const char *format, ...)
 	va_end(va);
 }
 
+#define MAX_CORE_OPTIONS 32
+static struct retro_core_option_definition option_defs[MAX_CORE_OPTIONS + 1];
+static char option_text[MAX_CORE_OPTIONS][512];
+
+/* Sub-label (explanatory text) for an option, if it has one. */
+static const char *option_info(const char *key)
+{
+   if (!strcmp(key, "X1_SWAPDRV"))
+      return "By default using the native Disk Swap interface within "
+             "RetroArch's menu will swap the disk in drive FDD0. Change this "
+             "option to swap disks in drive FDD1. The first two disks of an "
+             ".m3u playlist are inserted in FDD0 and FDD1 at start.";
+   return NULL;
+}
+
+/* Register the options. Frontends that support core options v1 get the
+ * explanatory text; older ones get the plain variable list as before. */
+static void register_core_options(retro_environment_t cb,
+      const struct retro_variable *vars)
+{
+   unsigned version = 0;
+   int n;
+
+   if (!cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version) || version < 1)
+   {
+      cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
+      return;
+   }
+
+   memset(option_defs, 0, sizeof(option_defs));
+
+   for (n = 0; vars[n].key && n < MAX_CORE_OPTIONS; n++)
+   {
+      struct retro_core_option_definition *def = &option_defs[n];
+      char *text = option_text[n];
+      char *sep;
+      char *tok;
+      int v = 0;
+
+      snprintf(text, sizeof(option_text[n]), "%s", vars[n].value);
+      sep = strstr(text, "; ");
+      if (!sep)
+      {
+         cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
+         return;
+      }
+      *sep = '\0';
+
+      def->key  = vars[n].key;
+      def->desc = text;
+      def->info = option_info(vars[n].key);
+
+      /* "VALUE1|VALUE2|..." -- the first value is the default */
+      tok = sep + 2;
+      while (tok && *tok && v < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1)
+      {
+         def->values[v].value = tok;
+         def->values[v].label = NULL;
+         v++;
+         tok = strchr(tok, '|');
+         if (tok)
+            *tok++ = '\0';
+      }
+      def->default_value = def->values[0].value;
+   }
+
+   cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS, option_defs);
+}
+
 void retro_set_environment(retro_environment_t cb)
 {
    environ_cb = cb;
@@ -141,11 +217,12 @@ void retro_set_environment(retro_environment_t cb)
       },
       { "X1_AUDIO_DELAYMS", "Audio buffer (ms); 250|100|150|200|300|350|500|750|1000" },
       { "X1_CPU_CLOCK", "Cpu clock (MHz); 4|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20" },
+      { "X1_SWAPDRV", "Swap Disks on Drive; FDD0|FDD1" },
 
       { NULL, NULL },
    };
 
-   cb(RETRO_ENVIRONMENT_SET_VARIABLES, variables);
+   register_core_options(cb, variables);
 
    struct retro_vfs_interface_info vfs_interface_info;
    vfs_interface_info.required_interface_version = 1;
@@ -415,11 +492,32 @@ bool retro_serialize(void *data, size_t size)
   return true;
 }
 
+/* After a state load the mounted disks may differ from what we last set:
+ * point drive_idx[] at the list entries that are actually in the drives. */
+static void sync_drive_selection(void)
+{
+  int d, i;
+
+  for (d = 0; d < NUM_SWAP_DRIVES; d++) {
+    if (!fddfile_diskready(d))
+      continue;
+    for (i = 0; i < cur_disk_num; i++) {
+      if (images[i] && !strcmp(images[i], fddfile_diskname(d))) {
+        drive_idx[d] = i;
+        break;
+      }
+    }
+  }
+}
+
 bool retro_unserialize(const void *data, size_t size)
 {
   memcpy(&framecount, (char *)data, 8);
   FILEH fh = make_readmem_file(data+8, size-8);
-  return statsave_load_fh(fh) >= 0;
+  if (statsave_load_fh(fh) < 0)
+    return false;
+  sync_drive_selection();
+  return true;
 }
 
 void retro_cheat_reset(void)
@@ -449,7 +547,8 @@ static void disk_list_clear(void)
          images[i] = NULL;
       }
    }
-   cur_disk_idx = 0;
+   drive_idx[0] = -1;
+   drive_idx[1] = -1;
    cur_disk_num = 0;
 }
 
@@ -604,7 +703,10 @@ bool retro_load_game(const struct retro_game_info *info)
       images[0] = strdup(full_path);
       cur_disk_num = 1;
    }
-   cur_disk_idx = 0;
+
+   /* First disk goes in FDD0 (the boot drive), second one in FDD1. */
+   drive_idx[0] = 0;
+   drive_idx[1] = (cur_disk_num >= 2) ? 1 : -1;
 
    /* The first disk in the list is the one that gets booted. */
    strncpy(RPATH, images[0], sizeof(RPATH) - 1);
@@ -665,27 +767,43 @@ size_t retro_get_memory_size(unsigned id)
     return 0;
 }
 
+/* The drive that RetroArch's Disk Control menu currently works on. */
+static int swap_drive(void)
+{
+  struct retro_variable var = {0};
+
+  var.key = "X1_SWAPDRV";
+  if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+      !strcmp(var.value, "FDD1"))
+    return 1;
+  return 0;
+}
+
 bool set_eject_state(bool ejected) {
-  if (ejected || cur_disk_idx >= cur_disk_num || !images[cur_disk_idx]) {
-    fddfile_eject(0);
+  int drv = swap_drive();
+  int idx = drive_idx[drv];
+
+  if (ejected || idx < 0 || idx >= cur_disk_num || !images[idx]) {
+    fddfile_eject(drv);
   } else {
-    diskdrv_setfdd(0, images[cur_disk_idx], 0);
+    diskdrv_setfdd(drv, images[idx], 0);
   }
   return 1;
 }
 
-/* TODO: support FDD 1. */
-
 bool get_eject_state (void) {
-  return !fddfile_diskready(0);
+  return !fddfile_diskready(swap_drive());
 }
 
 unsigned get_image_index (void) {
-    return cur_disk_idx;
+  int idx = drive_idx[swap_drive()];
+
+  /* index >= number of images means "no disk" */
+  return (idx < 0) ? (unsigned)cur_disk_num : (unsigned)idx;
 }
 
 bool set_image_index(unsigned index) {
-  cur_disk_idx = index;
+  drive_idx[swap_drive()] = ((int)index >= cur_disk_num) ? -1 : (int)index;
   return 1;
 }
 
@@ -715,8 +833,14 @@ bool replace_image_index(unsigned index,
     images[i] = images[i + 1];
   images[cur_disk_num - 1] = NULL;
   cur_disk_num--;
-  if (cur_disk_idx > cur_disk_num)
-    cur_disk_idx = cur_disk_num;
+
+  /* Keep each drive's selection pointing at the same disk. */
+  for (i = 0; i < NUM_SWAP_DRIVES; i++) {
+    if (drive_idx[i] == (int)index)
+      drive_idx[i] = -1;
+    else if (drive_idx[i] > (int)index)
+      drive_idx[i]--;
+  }
   return 1;
 }
 
@@ -891,7 +1015,9 @@ void retro_run(void)
    framecount++;
    if(firstcall)
    {
-      pre_main(RPATH);
+      pre_main(RPATH);   /* mounts the first disk in FDD0 */
+      if (drive_idx[1] >= 0 && drive_idx[1] < cur_disk_num && images[drive_idx[1]])
+         diskdrv_setfdd(1, images[drive_idx[1]], 0);
       update_variables();
       mousemng_enable(MOUSEPROC_SYSTEM);
       firstcall=0;
