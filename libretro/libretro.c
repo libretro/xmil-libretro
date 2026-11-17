@@ -729,6 +729,46 @@ bool add_image_index(void) {
   return 1;
 }
 
+/* Full path of a disk image (used by RetroArch to remember disks). */
+static bool get_image_path(unsigned index, char *path, size_t len) {
+  if (!path || len == 0 || (int)index >= cur_disk_num || !images[index])
+    return 0;
+  snprintf(path, len, "%s", images[index]);
+  return 1;
+}
+
+/* Label shown in RetroArch's Disk Control menu: the disk's file name
+ * without folder and extension, e.g. "MyGame (Disk 2)". */
+static bool get_image_label(unsigned index, char *label, size_t len) {
+  const char *name;
+  const char *sep1;
+  const char *sep2;
+  const char *dot;
+  size_t n;
+
+  if (!label || len == 0 || (int)index >= cur_disk_num || !images[index])
+    return 0;
+
+  name = images[index];
+  sep1 = strrchr(name, '/');
+  sep2 = strrchr(name, '\\');
+  if (sep1 && (!sep2 || sep1 > sep2))
+    name = sep1 + 1;
+  else if (sep2)
+    name = sep2 + 1;
+
+  n = strlen(name);
+  dot = strrchr(name, '.');
+  if (dot && dot != name)
+    n = (size_t)(dot - name);
+
+  if (n >= len)
+    n = len - 1;
+  memcpy(label, name, n);
+  label[n] = '\0';
+  return 1;
+}
+
 struct retro_disk_control_callback disk_controller =
   {
    .set_eject_state = set_eject_state,
@@ -738,6 +778,21 @@ struct retro_disk_control_callback disk_controller =
    .get_num_images = get_num_images,
    .replace_image_index = replace_image_index,
    .add_image_index = add_image_index
+};
+
+/* Same callbacks plus disk names, for frontends that support them. */
+struct retro_disk_control_ext_callback disk_controller_ext =
+  {
+   .set_eject_state = set_eject_state,
+   .get_eject_state = get_eject_state,
+   .get_image_index = get_image_index,
+   .set_image_index = set_image_index,
+   .get_num_images = get_num_images,
+   .replace_image_index = replace_image_index,
+   .add_image_index = add_image_index,
+   .set_initial_image = NULL,
+   .get_image_path = get_image_path,
+   .get_image_label = get_image_label
 };
 
 void retro_init(void)
@@ -802,7 +857,13 @@ void retro_init(void)
     struct retro_keyboard_callback cbk = { keyboard_cb };
     environ_cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &cbk);
 */
-	environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_controller);
+	{
+		unsigned dci_version = 0;
+		if (environ_cb(RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION, &dci_version) && dci_version >= 1)
+			environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE, &disk_controller_ext);
+		else
+			environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_controller);
+	}
   	update_variables();
 
     memset(Core_Key_Sate,0,512);
