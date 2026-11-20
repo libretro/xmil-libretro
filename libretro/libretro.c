@@ -66,10 +66,6 @@ uint16_t videoBuffer[(SCREEN_PITCH / 2) * FULLSCREEN_HEIGHT];  //emu  surf
 static char *images[MAX_DISK_IMAGES];
 static int cur_disk_num;
 
-/* The core emulates two floppy drives, FDD0 and FDD1. The disk list is shared
- * by both; drive_idx[] remembers which list entry is selected for each drive
- * (-1 = no disk). RetroArch's Disk Control menu works on one drive at a time,
- * chosen with the "Swap Disks on Drive" core option. */
 #define NUM_SWAP_DRIVES 2
 static int drive_idx[NUM_SWAP_DRIVES] = { -1, -1 };
 
@@ -127,7 +123,6 @@ void log_printf(const char *format, ...)
 static struct retro_core_option_definition option_defs[MAX_CORE_OPTIONS + 1];
 static char option_text[MAX_CORE_OPTIONS][512];
 
-/* Sub-label (explanatory text) for an option, if it has one. */
 static const char *option_info(const char *key)
 {
    if (!strcmp(key, "X1_SWAPDRV"))
@@ -138,8 +133,6 @@ static const char *option_info(const char *key)
    return NULL;
 }
 
-/* Register the options. Frontends that support core options v1 get the
- * explanatory text; older ones get the plain variable list as before. */
 static void register_core_options(retro_environment_t cb,
       const struct retro_variable *vars)
 {
@@ -175,7 +168,6 @@ static void register_core_options(retro_environment_t cb,
       def->desc = text;
       def->info = option_info(vars[n].key);
 
-      /* "VALUE1|VALUE2|..." -- the first value is the default */
       tok = sep + 2;
       while (tok && *tok && v < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1)
       {
@@ -492,8 +484,6 @@ bool retro_serialize(void *data, size_t size)
   return true;
 }
 
-/* After a state load the mounted disks may differ from what we last set:
- * point drive_idx[] at the list entries that are actually in the drives. */
 static void sync_drive_selection(void)
 {
   int d, i;
@@ -530,11 +520,6 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
     (void)code;
 }
 
-/* ------------------------------------------------------------------
- * Disk list helpers (multi-disk support)
- * ------------------------------------------------------------------ */
-
-/* Free every entry of the disk list and reset the counters. */
 static void disk_list_clear(void)
 {
    int i;
@@ -552,7 +537,6 @@ static void disk_list_clear(void)
    cur_disk_num = 0;
 }
 
-/* Case-insensitive check of a file extension (ext given without the dot). */
 static int path_has_extension(const char *path, const char *ext)
 {
    size_t plen = strlen(path);
@@ -575,16 +559,11 @@ static int path_is_absolute(const char *path)
 {
    if (path[0] == '/' || path[0] == '\\')
       return 1;
-   /* Windows drive letter, e.g. "C:\games\disk.d88" */
    if (isalpha((unsigned char)path[0]) && path[1] == ':')
       return 1;
    return 0;
 }
 
-/* Fill the disk list from an .m3u playlist.
- * One disk image per line. Empty lines and lines starting with '#' are
- * ignored. Relative paths are resolved from the playlist's directory.
- * Returns the number of disks found. */
 static int disk_list_load_m3u(const char *m3u_path)
 {
    char line[1024];
@@ -604,7 +583,6 @@ static int disk_list_load_m3u(const char *m3u_path)
       return 0;
    }
 
-   /* Directory of the playlist, including the trailing separator. */
    sep1 = strrchr(m3u_path, '/');
    sep2 = strrchr(m3u_path, '\\');
    if (!sep1)
@@ -626,7 +604,6 @@ static int disk_list_load_m3u(const char *m3u_path)
       char *end;
       size_t len = strlen(line);
 
-      /* Over-long line: throw away the rest of it. */
       if (len > 0 && line[len - 1] != '\n' && !feof(fp))
       {
          int c;
@@ -634,7 +611,6 @@ static int disk_list_load_m3u(const char *m3u_path)
             ;
       }
 
-      /* Skip UTF-8 byte order mark on the first line. */
       if (first_line)
       {
          first_line = 0;
@@ -704,11 +680,9 @@ bool retro_load_game(const struct retro_game_info *info)
       cur_disk_num = 1;
    }
 
-   /* First disk goes in FDD0 (the boot drive), second one in FDD1. */
    drive_idx[0] = 0;
    drive_idx[1] = (cur_disk_num >= 2) ? 1 : -1;
 
-   /* The first disk in the list is the one that gets booted. */
    strncpy(RPATH, images[0], sizeof(RPATH) - 1);
    RPATH[sizeof(RPATH) - 1] = '\0';
 
@@ -767,7 +741,6 @@ size_t retro_get_memory_size(unsigned id)
     return 0;
 }
 
-/* The drive that RetroArch's Disk Control menu currently works on. */
 static int swap_drive(void)
 {
   struct retro_variable var = {0};
@@ -798,7 +771,6 @@ bool get_eject_state (void) {
 unsigned get_image_index (void) {
   int idx = drive_idx[swap_drive()];
 
-  /* index >= number of images means "no disk" */
   return (idx < 0) ? (unsigned)cur_disk_num : (unsigned)idx;
 }
 
@@ -819,14 +791,12 @@ bool replace_image_index(unsigned index,
     return 0;
 
   if (info && info->path) {
-    /* Put a new image in this slot. */
     if (images[index])
       free(images[index]);
     images[index] = strdup(info->path);
     return 1;
   }
 
-  /* info == NULL: remove the image and close the gap in the list. */
   if (images[index])
     free(images[index]);
   for (i = (int)index; i < cur_disk_num - 1; i++)
@@ -834,7 +804,6 @@ bool replace_image_index(unsigned index,
   images[cur_disk_num - 1] = NULL;
   cur_disk_num--;
 
-  /* Keep each drive's selection pointing at the same disk. */
   for (i = 0; i < NUM_SWAP_DRIVES; i++) {
     if (drive_idx[i] == (int)index)
       drive_idx[i] = -1;
@@ -847,13 +816,11 @@ bool replace_image_index(unsigned index,
 bool add_image_index(void) {
   if (cur_disk_num >= MAX_DISK_IMAGES)
     return 0;
-  /* New empty slot; replace_image_index() fills it in afterwards. */
   images[cur_disk_num] = NULL;
   cur_disk_num++;
   return 1;
 }
 
-/* Full path of a disk image (used by RetroArch to remember disks). */
 static bool get_image_path(unsigned index, char *path, size_t len) {
   if (!path || len == 0 || (int)index >= cur_disk_num || !images[index])
     return 0;
@@ -861,8 +828,6 @@ static bool get_image_path(unsigned index, char *path, size_t len) {
   return 1;
 }
 
-/* Label shown in RetroArch's Disk Control menu: the disk's file name
- * without folder and extension, e.g. "MyGame (Disk 2)". */
 static bool get_image_label(unsigned index, char *label, size_t len) {
   const char *name;
   const char *sep1;
@@ -904,7 +869,6 @@ struct retro_disk_control_callback disk_controller =
    .add_image_index = add_image_index
 };
 
-/* Same callbacks plus disk names, for frontends that support them. */
 struct retro_disk_control_ext_callback disk_controller_ext =
   {
    .set_eject_state = set_eject_state,
@@ -1004,18 +968,24 @@ void retro_deinit(void)
    log_printf("Retro DeInit\n");
 }
 
+static int firstcall=1;
+
 void retro_reset(void)
 {
-}
+   if (firstcall)
+      return;
 
-static int firstcall=1;
+   update_variables();
+
+   pccore_reset();
+}
 
 void retro_run(void)
 {
    framecount++;
    if(firstcall)
    {
-      pre_main(RPATH);   /* mounts the first disk in FDD0 */
+      pre_main(RPATH);
       if (drive_idx[1] >= 0 && drive_idx[1] < cur_disk_num && images[drive_idx[1]])
          diskdrv_setfdd(1, images[drive_idx[1]], 0);
       update_variables();
