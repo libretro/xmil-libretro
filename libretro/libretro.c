@@ -125,11 +125,17 @@ static char option_text[MAX_CORE_OPTIONS][512];
 
 static const char *option_info(const char *key)
 {
+   if (!strcmp(key, "X1_MULTIDRIVE"))
+      return "ON: the first two disks of an .m3u playlist are inserted in "
+             "drives FDD0 and FDD1 at start. OFF: only drive FDD0 is used and "
+             "'Swap Disks on Drive' has no effect. Changes apply when content "
+             "is loaded or reset.";
    if (!strcmp(key, "X1_SWAPDRV"))
       return "By default using the native Disk Swap interface within "
              "RetroArch's menu will swap the disk in drive FDD0. Change this "
-             "option to swap disks in drive FDD1. The first two disks of an "
-             ".m3u playlist are inserted in FDD0 and FDD1 at start.";
+             "option to swap disks in drive FDD1. With Multi-Drive ON, the "
+             "first two disks of an .m3u playlist are inserted in FDD0 and "
+             "FDD1 at start.";
    return NULL;
 }
 
@@ -209,6 +215,7 @@ void retro_set_environment(retro_environment_t cb)
       },
       { "X1_AUDIO_DELAYMS", "Audio buffer (ms); 250|100|150|200|300|350|500|750|1000" },
       { "X1_CPU_CLOCK", "Cpu clock (MHz); 4|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20" },
+      { "X1_MULTIDRIVE", "Multi-Drive; ON|OFF" },
       { "X1_SWAPDRV", "Swap Disks on Drive; FDD0|FDD1" },
 
       { NULL, NULL },
@@ -643,6 +650,17 @@ static int disk_list_load_m3u(const char *m3u_path)
    return cur_disk_num;
 }
 
+static int multidrive_enabled(void)
+{
+   struct retro_variable var = {0};
+
+   var.key = "X1_MULTIDRIVE";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+       !strcmp(var.value, "OFF"))
+      return 0;
+   return 1;
+}
+
 bool retro_load_game(const struct retro_game_info *info)
 {
    const char *full_path;
@@ -681,7 +699,7 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
    drive_idx[0] = 0;
-   drive_idx[1] = (cur_disk_num >= 2) ? 1 : -1;
+   drive_idx[1] = (multidrive_enabled() && cur_disk_num >= 2) ? 1 : -1;
 
    strncpy(RPATH, images[0], sizeof(RPATH) - 1);
    RPATH[sizeof(RPATH) - 1] = '\0';
@@ -745,6 +763,8 @@ static int swap_drive(void)
 {
   struct retro_variable var = {0};
 
+  if (!multidrive_enabled())
+    return 0;
   var.key = "X1_SWAPDRV";
   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
       !strcmp(var.value, "FDD1"))
@@ -1013,6 +1033,12 @@ void retro_reset(void)
       return;
 
    update_variables();
+
+   if (!multidrive_enabled())
+   {
+      fddfile_eject(1);
+      drive_idx[1] = -1;
+   }
 
    pccore_reset();
 }
