@@ -883,6 +883,26 @@ struct retro_disk_control_ext_callback disk_controller_ext =
    .get_image_label = get_image_label
 };
 
+static int has_font(const char *dir)
+{
+   static const char *names[] = { "FNT0808.X1", "FNT0816.X1", "FNT1616.X1" };
+   char path[512];
+   FILEH fh;
+   int i;
+
+   for (i = 0; i < 3; i++)
+   {
+      snprintf(path, sizeof(path), "%s%s", dir, names[i]);
+      fh = file_open_rb(path);
+      if (fh != FILEH_INVALID)
+      {
+         file_close(fh);
+         return 1;
+      }
+   }
+   return 0;
+}
+
 void retro_init(void)
 {
    const char *system_dir = NULL;
@@ -918,6 +938,23 @@ void retro_init(void)
    else sprintf(RETRO_DIR, "%s\0", retro_system_directory);
 
    sprintf(retro_system_conf, "%s%cxmil\0",RETRO_DIR,slash);
+
+   {
+      char font_dir[512];
+      char *p;
+
+      snprintf(font_dir, sizeof(font_dir), "%s%c", retro_system_conf, slash);
+      if (slash == '\\')
+      {
+         for (p = font_dir; *p; p++)
+         {
+            if (*p == '\\')
+               *p = '/';
+         }
+      }
+      if (has_font(font_dir) || !has_font("./"))
+         file_setcd(font_dir);
+   }
 
    static struct retro_input_descriptor inputDescriptors[] = {
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "A" },
