@@ -64,7 +64,10 @@ uint16_t videoBuffer[(SCREEN_PITCH / 2) * FULLSCREEN_HEIGHT];  //emu  surf
 
 #define MAX_DISK_IMAGES 100
 static char *images[MAX_DISK_IMAGES];
-static int cur_disk_idx, cur_disk_num;
+static int cur_disk_num;
+
+#define NUM_SWAP_DRIVES 2
+static int drive_idx[NUM_SWAP_DRIVES] = { -1, -1 };
 
 static retro_video_refresh_t video_cb;
 static retro_environment_t environ_cb;
@@ -116,6 +119,77 @@ void log_printf(const char *format, ...)
 	va_end(va);
 }
 
+#define MAX_CORE_OPTIONS 32
+static struct retro_core_option_definition option_defs[MAX_CORE_OPTIONS + 1];
+static char option_text[MAX_CORE_OPTIONS][512];
+
+static const char *option_info(const char *key)
+{
+   if (!strcmp(key, "X1_MULTIDRIVE"))
+      return "ON: the first two disks of an .m3u playlist are inserted in "
+             "drives FDD0 and FDD1 at start. OFF: only drive FDD0 is used and "
+             "'Swap Disks on Drive' has no effect. Changes apply when content "
+             "is loaded or reset.";
+   if (!strcmp(key, "X1_SWAPDRV"))
+      return "By default using the native Disk Swap interface within "
+             "RetroArch's menu will swap the disk in drive FDD0. Change this "
+             "option to swap disks in drive FDD1. With Multi-Drive ON, the "
+             "first two disks of an .m3u playlist are inserted in FDD0 and "
+             "FDD1 at start.";
+   return NULL;
+}
+
+static void register_core_options(retro_environment_t cb,
+      const struct retro_variable *vars)
+{
+   unsigned version = 0;
+   int n;
+
+   if (!cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version) || version < 1)
+   {
+      cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
+      return;
+   }
+
+   memset(option_defs, 0, sizeof(option_defs));
+
+   for (n = 0; vars[n].key && n < MAX_CORE_OPTIONS; n++)
+   {
+      struct retro_core_option_definition *def = &option_defs[n];
+      char *text = option_text[n];
+      char *sep;
+      char *tok;
+      int v = 0;
+
+      snprintf(text, sizeof(option_text[n]), "%s", vars[n].value);
+      sep = strstr(text, "; ");
+      if (!sep)
+      {
+         cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
+         return;
+      }
+      *sep = '\0';
+
+      def->key  = vars[n].key;
+      def->desc = text;
+      def->info = option_info(vars[n].key);
+
+      tok = sep + 2;
+      while (tok && *tok && v < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1)
+      {
+         def->values[v].value = tok;
+         def->values[v].label = NULL;
+         v++;
+         tok = strchr(tok, '|');
+         if (tok)
+            *tok++ = '\0';
+      }
+      def->default_value = def->values[0].value;
+   }
+
+   cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS, option_defs);
+}
+
 void retro_set_environment(retro_environment_t cb)
 {
    environ_cb = cb;
@@ -141,11 +215,13 @@ void retro_set_environment(retro_environment_t cb)
       },
       { "X1_AUDIO_DELAYMS", "Audio buffer (ms); 250|100|150|200|300|350|500|750|1000" },
       { "X1_CPU_CLOCK", "Cpu clock (MHz); 4|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20" },
+      { "X1_MULTIDRIVE", "Multi-Drive; ON|OFF" },
+      { "X1_SWAPDRV", "Swap Disks on Drive; FDD0|FDD1" },
 
       { NULL, NULL },
    };
 
-   cb(RETRO_ENVIRONMENT_SET_VARIABLES, variables);
+   register_core_options(cb, variables);
 
    struct retro_vfs_interface_info vfs_interface_info;
    vfs_interface_info.required_interface_version = 1;
@@ -362,7 +438,7 @@ void retro_get_system_info(struct retro_system_info *info)
    info->library_name = "x1";
    info->library_version = "0.60";
    info->need_fullpath = true;
-   info->valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd";
+   info->valid_extensions = "dx1|zip|2d|2hd|tfd|d88|88d|hdm|xdf|dup|cmd|m3u";
 }
 
 void retro_get_system_av_info(struct retro_system_av_info *info)
@@ -415,11 +491,30 @@ bool retro_serialize(void *data, size_t size)
   return true;
 }
 
+static void sync_drive_selection(void)
+{
+  int d, i;
+
+  for (d = 0; d < NUM_SWAP_DRIVES; d++) {
+    if (!fddfile_diskready(d))
+      continue;
+    for (i = 0; i < cur_disk_num; i++) {
+      if (images[i] && !strcmp(images[i], fddfile_diskname(d))) {
+        drive_idx[d] = i;
+        break;
+      }
+    }
+  }
+}
+
 bool retro_unserialize(const void *data, size_t size)
 {
   memcpy(&framecount, (char *)data, 8);
   FILEH fh = make_readmem_file(data+8, size-8);
-  return statsave_load_fh(fh) >= 0;
+  if (statsave_load_fh(fh) < 0)
+    return false;
+  sync_drive_selection();
+  return true;
 }
 
 void retro_cheat_reset(void)
@@ -430,6 +525,140 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
     (void)index;
     (void)enabled;
     (void)code;
+}
+
+static void disk_list_clear(void)
+{
+   int i;
+
+   for (i = 0; i < MAX_DISK_IMAGES; i++)
+   {
+      if (images[i])
+      {
+         free(images[i]);
+         images[i] = NULL;
+      }
+   }
+   drive_idx[0] = -1;
+   drive_idx[1] = -1;
+   cur_disk_num = 0;
+}
+
+static int path_has_extension(const char *path, const char *ext)
+{
+   size_t plen = strlen(path);
+   size_t elen = strlen(ext);
+   size_t i;
+
+   if (plen <= elen || path[plen - elen - 1] != '.')
+      return 0;
+
+   for (i = 0; i < elen; i++)
+   {
+      if (tolower((unsigned char)path[plen - elen + i]) !=
+          tolower((unsigned char)ext[i]))
+         return 0;
+   }
+   return 1;
+}
+
+static int path_is_absolute(const char *path)
+{
+   if (path[0] == '/' || path[0] == '\\')
+      return 1;
+   if (isalpha((unsigned char)path[0]) && path[1] == ':')
+      return 1;
+   return 0;
+}
+
+static int disk_list_load_m3u(const char *m3u_path)
+{
+   char line[1024];
+   char base_dir[1024];
+   char full[2048];
+   FILE *fp;
+   const char *sep1;
+   const char *sep2;
+   const char *last_sep;
+   size_t base_len;
+   int first_line = 1;
+
+   fp = fopen(m3u_path, "r");
+   if (!fp)
+   {
+      log_printf("Could not open playlist: %s\n", m3u_path);
+      return 0;
+   }
+
+   sep1 = strrchr(m3u_path, '/');
+   sep2 = strrchr(m3u_path, '\\');
+   if (!sep1)
+      last_sep = sep2;
+   else if (!sep2)
+      last_sep = sep1;
+   else
+      last_sep = (sep1 > sep2) ? sep1 : sep2;
+   base_len = last_sep ? (size_t)(last_sep - m3u_path) + 1 : 0;
+   if (base_len >= sizeof(base_dir))
+      base_len = 0;
+   memcpy(base_dir, m3u_path, base_len);
+   base_dir[base_len] = '\0';
+
+   while (cur_disk_num < MAX_DISK_IMAGES &&
+          fgets(line, sizeof(line), fp))
+   {
+      char *p = line;
+      char *end;
+      size_t len = strlen(line);
+
+      if (len > 0 && line[len - 1] != '\n' && !feof(fp))
+      {
+         int c;
+         while ((c = fgetc(fp)) != EOF && c != '\n')
+            ;
+      }
+
+      if (first_line)
+      {
+         first_line = 0;
+         if ((unsigned char)p[0] == 0xEF &&
+             (unsigned char)p[1] == 0xBB &&
+             (unsigned char)p[2] == 0xBF)
+            p += 3;
+      }
+
+      while (*p == ' ' || *p == '\t')
+         p++;
+
+      end = p + strlen(p);
+      while (end > p && (end[-1] == '\r' || end[-1] == '\n' ||
+                         end[-1] == ' '  || end[-1] == '\t'))
+         *--end = '\0';
+
+      if (*p == '\0' || *p == '#')
+         continue;
+
+      if (path_is_absolute(p))
+         snprintf(full, sizeof(full), "%s", p);
+      else
+         snprintf(full, sizeof(full), "%s%s", base_dir, p);
+
+      images[cur_disk_num++] = strdup(full);
+   }
+
+   fclose(fp);
+   return cur_disk_num;
+}
+
+static int multidrive_enabled(void)
+{
+   struct retro_variable var = {0};
+
+   var.key = "X1_MULTIDRIVE";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+       !strcmp(var.value, "OFF"))
+      return 0;
+   return 1;
 }
 
 bool retro_load_game(const struct retro_game_info *info)
@@ -445,12 +674,35 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
 
-   full_path = info->path;
-   images[0] = strdup(full_path);
-   cur_disk_idx = 0;
-   cur_disk_num = full_path ? 1 : 0;
+   if (!info || !info->path)
+   {
+      log_printf("No content given.\n");
+      return false;
+   }
 
-   strcpy(RPATH,full_path);
+   full_path = info->path;
+
+   disk_list_clear();
+
+   if (path_has_extension(full_path, "m3u"))
+   {
+      if (disk_list_load_m3u(full_path) == 0)
+      {
+         log_printf("Playlist contains no disks: %s\n", full_path);
+         return false;
+      }
+   }
+   else
+   {
+      images[0] = strdup(full_path);
+      cur_disk_num = 1;
+   }
+
+   drive_idx[0] = 0;
+   drive_idx[1] = (multidrive_enabled() && cur_disk_num >= 2) ? 1 : -1;
+
+   strncpy(RPATH, images[0], sizeof(RPATH) - 1);
+   RPATH[sizeof(RPATH) - 1] = '\0';
 
    log_printf("LOAD EMU\n");
 
@@ -468,6 +720,7 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
 void retro_unload_game(void)
 {
      pauseg=0;
+     disk_list_clear();
 }
 
 unsigned retro_get_region(void)
@@ -506,27 +759,43 @@ size_t retro_get_memory_size(unsigned id)
     return 0;
 }
 
+static int swap_drive(void)
+{
+  struct retro_variable var = {0};
+
+  if (!multidrive_enabled())
+    return 0;
+  var.key = "X1_SWAPDRV";
+  if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+      !strcmp(var.value, "FDD1"))
+    return 1;
+  return 0;
+}
+
 bool set_eject_state(bool ejected) {
-  if (ejected || cur_disk_idx >= cur_disk_num) {
-    fddfile_eject(0);
+  int drv = swap_drive();
+  int idx = drive_idx[drv];
+
+  if (ejected || idx < 0 || idx >= cur_disk_num || !images[idx]) {
+    fddfile_eject(drv);
   } else {
-    diskdrv_setfdd(0, images[cur_disk_idx], 0);
+    diskdrv_setfdd(drv, images[idx], 0);
   }
   return 1;
 }
 
-/* TODO: support FDD 1. */
-
 bool get_eject_state (void) {
-  return !fddfile_diskready(0);
+  return !fddfile_diskready(swap_drive());
 }
 
 unsigned get_image_index (void) {
-    return cur_disk_idx;
+  int idx = drive_idx[swap_drive()];
+
+  return (idx < 0) ? (unsigned)cur_disk_num : (unsigned)idx;
 }
 
 bool set_image_index(unsigned index) {
-  cur_disk_idx = index;
+  drive_idx[swap_drive()] = ((int)index >= cur_disk_num) ? -1 : (int)index;
   return 1;
 }
 
@@ -536,16 +805,76 @@ unsigned get_num_images(void) {
 
 bool replace_image_index(unsigned index,
 			 const struct retro_game_info *info) {
-  if (index >= cur_disk_num)
+  int i;
+
+  if ((int)index >= cur_disk_num)
     return 0;
-  images[index] = strdup(info->path);
+
+  if (info && info->path) {
+    if (images[index])
+      free(images[index]);
+    images[index] = strdup(info->path);
+    return 1;
+  }
+
+  if (images[index])
+    free(images[index]);
+  for (i = (int)index; i < cur_disk_num - 1; i++)
+    images[i] = images[i + 1];
+  images[cur_disk_num - 1] = NULL;
+  cur_disk_num--;
+
+  for (i = 0; i < NUM_SWAP_DRIVES; i++) {
+    if (drive_idx[i] == (int)index)
+      drive_idx[i] = -1;
+    else if (drive_idx[i] > (int)index)
+      drive_idx[i]--;
+  }
   return 1;
 }
 
 bool add_image_index(void) {
-  if (cur_disk_num >= MAX_DISK_IMAGES - 1)
+  if (cur_disk_num >= MAX_DISK_IMAGES)
     return 0;
+  images[cur_disk_num] = NULL;
   cur_disk_num++;
+  return 1;
+}
+
+static bool get_image_path(unsigned index, char *path, size_t len) {
+  if (!path || len == 0 || (int)index >= cur_disk_num || !images[index])
+    return 0;
+  snprintf(path, len, "%s", images[index]);
+  return 1;
+}
+
+static bool get_image_label(unsigned index, char *label, size_t len) {
+  const char *name;
+  const char *sep1;
+  const char *sep2;
+  const char *dot;
+  size_t n;
+
+  if (!label || len == 0 || (int)index >= cur_disk_num || !images[index])
+    return 0;
+
+  name = images[index];
+  sep1 = strrchr(name, '/');
+  sep2 = strrchr(name, '\\');
+  if (sep1 && (!sep2 || sep1 > sep2))
+    name = sep1 + 1;
+  else if (sep2)
+    name = sep2 + 1;
+
+  n = strlen(name);
+  dot = strrchr(name, '.');
+  if (dot && dot != name)
+    n = (size_t)(dot - name);
+
+  if (n >= len)
+    n = len - 1;
+  memcpy(label, name, n);
+  label[n] = '\0';
   return 1;
 }
 
@@ -559,6 +888,40 @@ struct retro_disk_control_callback disk_controller =
    .replace_image_index = replace_image_index,
    .add_image_index = add_image_index
 };
+
+struct retro_disk_control_ext_callback disk_controller_ext =
+  {
+   .set_eject_state = set_eject_state,
+   .get_eject_state = get_eject_state,
+   .get_image_index = get_image_index,
+   .set_image_index = set_image_index,
+   .get_num_images = get_num_images,
+   .replace_image_index = replace_image_index,
+   .add_image_index = add_image_index,
+   .set_initial_image = NULL,
+   .get_image_path = get_image_path,
+   .get_image_label = get_image_label
+};
+
+static int has_font(const char *dir)
+{
+   static const char *names[] = { "FNT0808.X1", "FNT0816.X1", "FNT1616.X1" };
+   char path[512];
+   FILEH fh;
+   int i;
+
+   for (i = 0; i < 3; i++)
+   {
+      snprintf(path, sizeof(path), "%s%s", dir, names[i]);
+      fh = file_open_rb(path);
+      if (fh != FILEH_INVALID)
+      {
+         file_close(fh);
+         return 1;
+      }
+   }
+   return 0;
+}
 
 void retro_init(void)
 {
@@ -596,6 +959,23 @@ void retro_init(void)
 
    sprintf(retro_system_conf, "%s%cxmil\0",RETRO_DIR,slash);
 
+   {
+      char font_dir[512];
+      char *p;
+
+      snprintf(font_dir, sizeof(font_dir), "%s%c", retro_system_conf, slash);
+      if (slash == '\\')
+      {
+         for (p = font_dir; *p; p++)
+         {
+            if (*p == '\\')
+               *p = '/';
+         }
+      }
+      if (has_font(font_dir) || !has_font("./"))
+         file_setcd(font_dir);
+   }
+
    static struct retro_input_descriptor inputDescriptors[] = {
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "A" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B, "B" },
@@ -622,7 +1002,13 @@ void retro_init(void)
     struct retro_keyboard_callback cbk = { keyboard_cb };
     environ_cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &cbk);
 */
-	environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_controller);
+	{
+		unsigned dci_version = 0;
+		if (environ_cb(RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION, &dci_version) && dci_version >= 1)
+			environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE, &disk_controller_ext);
+		else
+			environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_controller);
+	}
   	update_variables();
 
     memset(Core_Key_Sate,0,512);
@@ -639,11 +1025,23 @@ void retro_deinit(void)
    log_printf("Retro DeInit\n");
 }
 
+static int firstcall=1;
+
 void retro_reset(void)
 {
-}
+   if (firstcall)
+      return;
 
-static int firstcall=1;
+   update_variables();
+
+   if (!multidrive_enabled())
+   {
+      fddfile_eject(1);
+      drive_idx[1] = -1;
+   }
+
+   pccore_reset();
+}
 
 void retro_run(void)
 {
@@ -651,6 +1049,8 @@ void retro_run(void)
    if(firstcall)
    {
       pre_main(RPATH);
+      if (drive_idx[1] >= 0 && drive_idx[1] < cur_disk_num && images[drive_idx[1]])
+         diskdrv_setfdd(1, images[drive_idx[1]], 0);
       update_variables();
       mousemng_enable(MOUSEPROC_SYSTEM);
       firstcall=0;
